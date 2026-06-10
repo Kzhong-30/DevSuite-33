@@ -49,7 +49,7 @@ const CircularGeofenceSchema = new Schema<ICircularGeofence>({
     coordinates: {
       type: [Number],
       required: true,
-      index: '2dsphere'
+            
     }
   },
   radius: {
@@ -76,7 +76,7 @@ const PolygonGeofenceSchema = new Schema<IPolygonGeofence>({
     coordinates: {
       type: [[[Number]]],
       required: true,
-      index: '2dsphere'
+            
     }
   }
 });
