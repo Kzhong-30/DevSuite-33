@@ -381,6 +381,268 @@ async function test11_invalidCoordinatesAndNotFound(): Promise<void> {
   assert(nf3.status === 404, '不存在的围栏ID返回404', `实际状态码: ${nf3.status}`);
 }
 
+async function test12_bulkLocationPagination(): Promise<void> {
+  console.log('\n📌 测试12: 大量轨迹分页性能');
+  const socket = SocketIOClient(BASE_URL, { reconnection: false, timeout: 5000 });
+  let registered = false;
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; resolve(); } };
+    socket.on('connect', () => {
+      socket.emit('device:register', { deviceId: 'e2e-stress-001', name: '压力测试设备', type: 'truck' });
+    });
+    socket.on('device:registered', (data: any) => {
+      if (data.deviceId === 'e2e-stress-001') {
+        registered = true;
+        for (let i = 0; i < 50; i++) {
+          const lng = 116.4 + (117.2 - 116.4) * (i / 49);
+          const lat = 39.9 + (39.1 - 39.9) * (i / 49);
+          socket.emit('device:location', { deviceId: 'e2e-stress-001', longitude: Math.round(lng * 10000) / 10000, latitude: Math.round(lat * 10000) / 10000 });
+        }
+      }
+    });
+    socket.on('device:location:ack', () => {});
+    socket.on('connect_error', () => { done(); });
+    setTimeout(done, 8000);
+  });
+  assert(registered, '设备e2e-stress-001注册成功', '未收到注册确认');
+  socket.disconnect();
+  await sleep(2000);
+  const histRes = await httpGet('/devices/e2e-stress-001/history');
+  assert(histRes.status === 200, '获取历史记录返回200', `实际状态码: ${histRes.status}`);
+  assert(histRes.data.pagination.total >= 50, '历史记录总数>=50', `实际: ${histRes.data.pagination.total}`);
+  const pagStart = Date.now();
+  const pagRes = await httpGet('/devices/e2e-stress-001/history?page=1&limit=10');
+  const pagTime = Date.now() - pagStart;
+  assert(pagRes.status === 200, '分页查询返回200', `实际状态码: ${pagRes.status}`);
+  assert(pagRes.data.pagination.totalPages >= 5, 'totalPages>=5', `实际: ${pagRes.data.pagination.totalPages}`);
+  assert(pagRes.data.data.length <= 10, '第1页数据<=10条', `实际: ${pagRes.data.data.length}`);
+  assert(pagTime < 2000, '分页查询响应时间<2秒', `实际: ${pagTime}ms`);
+  const page5Res = await httpGet('/devices/e2e-stress-001/history?page=5&limit=10');
+  assert(page5Res.status === 200, '第5页查询返回200', `实际状态码: ${page5Res.status}`);
+  assert(page5Res.data.pagination.page === 5, '第5页页码正确', `实际: ${page5Res.data.pagination.page}`);
+  const routeStart = Date.now();
+  const routeRes = await httpGet('/devices/e2e-stress-001/route');
+  const routeTime = Date.now() - routeStart;
+  assert(routeRes.status === 200, '路线生成返回200', `实际状态码: ${routeRes.status}`);
+  assert(routeTime < 2000, '路线生成响应时间<2秒', `实际: ${routeTime}ms`);
+  if (routeRes.data?.data?.geometry) {
+    assert(routeRes.data.data.geometry.coordinates.length >= 50, '路线坐标点>=50', `实际: ${routeRes.data.data.geometry.coordinates.length}`);
+  }
+}
+
+async function test13_overlappingGeofenceAlerts(): Promise<void> {
+  console.log('\n📌 测试13: 多围栏重叠告警顺序');
+  const circleA = await httpPost('/geofences', {
+    name: '围栏A-小圆', geofenceType: 'circle',
+    circular: { center: [116.4074, 39.9042], radius: 100 },
+    alerts: ['enter'], enabled: true,
+  });
+  assert(circleA.status === 201, '创建围栏A返回201', `实际状态码: ${circleA.status}`);
+  const circleB = await httpPost('/geofences', {
+    name: '围栏B-大圆', geofenceType: 'circle',
+    circular: { center: [116.4074, 39.9042], radius: 1000 },
+    alerts: ['exit'], enabled: true,
+  });
+  assert(circleB.status === 201, '创建围栏B返回201', `实际状态码: ${circleB.status}`);
+  const polygonC = await httpPost('/geofences', {
+    name: '围栏C-多边形', geofenceType: 'polygon',
+    polygon: { coordinates: [[[116.3974, 39.8942], [116.4174, 39.8942], [116.4174, 39.9142], [116.3974, 39.9142], [116.3974, 39.8942]]] },
+    alerts: ['enter', 'exit'], enabled: true,
+  });
+  assert(polygonC.status === 201, '创建围栏C返回201', `实际状态码: ${polygonC.status}`);
+  const socket = SocketIOClient(BASE_URL, { reconnection: false, timeout: 5000 });
+  const enterAlerts: any[] = [];
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; socket.disconnect(); resolve(); } };
+    socket.on('connect', () => {
+      socket.emit('device:register', { deviceId: 'e2e-overlap-001', name: '重叠测试设备', type: 'car' });
+    });
+    socket.on('device:registered', () => {
+      setTimeout(() => {
+        socket.emit('device:location', { deviceId: 'e2e-overlap-001', longitude: 116.4074, latitude: 39.9042 });
+      }, 300);
+    });
+    socket.on('geofence:alert', (data: any) => {
+      if (data.type === 'enter') enterAlerts.push(data);
+    });
+    setTimeout(done, 3000);
+  });
+  assert(enterAlerts.length >= 2, '收到至少2个enter告警(围栏A和C)', `实际: ${enterAlerts.length}个`);
+  for (const a of enterAlerts) {
+    assert(!!a.geofenceId, 'enter告警包含geofenceId', `告警: ${JSON.stringify(a)}`);
+    assert(a.deviceId === 'e2e-overlap-001', 'enter告警deviceId正确', `实际: ${a.deviceId}`);
+  }
+  const socket2 = SocketIOClient(BASE_URL, { reconnection: false, timeout: 5000 });
+  const exitAlerts: any[] = [];
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; socket2.disconnect(); resolve(); } };
+    socket2.on('connect', () => {
+      socket2.emit('device:register', { deviceId: 'e2e-overlap-001' });
+    });
+    socket2.on('device:registered', () => {
+      setTimeout(() => {
+        socket2.emit('device:location', { deviceId: 'e2e-overlap-001', longitude: 116.5, latitude: 40.0 });
+      }, 500);
+    });
+    socket2.on('geofence:alert', (data: any) => {
+      if (data.type === 'exit') exitAlerts.push(data);
+    });
+    setTimeout(done, 3000);
+  });
+  assert(exitAlerts.length >= 1, '收到至少1个exit告警(围栏B或C)', `实际: ${exitAlerts.length}个`);
+  for (const a of exitAlerts) {
+    assert(!!a.geofenceId, 'exit告警包含geofenceId', `告警: ${JSON.stringify(a)}`);
+    assert(a.deviceId === 'e2e-overlap-001', 'exit告警deviceId正确', `实际: ${a.deviceId}`);
+  }
+}
+
+async function test14_deviceDisconnectReconnect(): Promise<void> {
+  console.log('\n📌 测试14: 设备断连重连状态恢复');
+  const socket1 = SocketIOClient(BASE_URL, { reconnection: false, timeout: 5000 });
+  let reg1Success = false;
+  let loc1Ack = false;
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; resolve(); } };
+    socket1.on('connect', () => {
+      socket1.emit('device:register', { deviceId: 'e2e-reconnect-001', name: '重连测试设备', type: 'truck' });
+    });
+    socket1.on('device:registered', (data: any) => {
+      if (data.deviceId === 'e2e-reconnect-001') {
+        reg1Success = true;
+        setTimeout(() => {
+          socket1.emit('device:location', { deviceId: 'e2e-reconnect-001', longitude: 116.3, latitude: 39.8 });
+        }, 300);
+      }
+    });
+    socket1.on('device:location:ack', (data: any) => {
+      if (data.success) loc1Ack = true;
+    });
+    setTimeout(done, 3000);
+  });
+  assert(reg1Success, '首次注册成功', '未收到注册确认');
+  assert(loc1Ack, '首次位置上报ack', '未收到位置确认');
+  socket1.disconnect();
+  await sleep(1000);
+  const socket2 = SocketIOClient(BASE_URL, { reconnection: false, timeout: 5000 });
+  let reg2Success = false;
+  let reg2Status = '';
+  let loc2Ack = false;
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; socket2.disconnect(); resolve(); } };
+    socket2.on('connect', () => {
+      socket2.emit('device:register', { deviceId: 'e2e-reconnect-001' });
+    });
+    socket2.on('device:registered', (data: any) => {
+      if (data.deviceId === 'e2e-reconnect-001') {
+        reg2Success = true;
+        reg2Status = data.status;
+        setTimeout(() => {
+          socket2.emit('device:location', { deviceId: 'e2e-reconnect-001', longitude: 117.0, latitude: 40.5 });
+        }, 300);
+      }
+    });
+    socket2.on('device:location:ack', (data: any) => {
+      if (data.success) loc2Ack = true;
+    });
+    setTimeout(done, 3000);
+  });
+  assert(reg2Success, '重连注册成功', '未收到注册确认');
+  assert(reg2Status === 'online', '重连后状态为online', `实际: ${reg2Status}`);
+  assert(loc2Ack, '重连后位置上报ack', '未收到位置确认');
+  const devRes = await httpGet('/devices/e2e-reconnect-001/location');
+  assert(devRes.status === 200, 'HTTP获取设备位置返回200', `实际状态码: ${devRes.status}`);
+  assert(devRes.data.data.longitude === 117.0, '最新位置经度为117.0', `实际: ${devRes.data.data.longitude}`);
+  assert(devRes.data.data.latitude === 40.5, '最新位置纬度为40.5', `实际: ${devRes.data.data.latitude}`);
+  const devListRes = await httpGet('/devices?status=online');
+  const dev = devListRes.data.data.find((d: any) => d.deviceId === 'e2e-reconnect-001');
+  assert(!!dev, '设备列表中包含e2e-reconnect-001', '未找到该设备');
+  if (dev) {
+    assert(dev.status === 'online', '设备状态为online', `实际: ${dev.status}`);
+  }
+}
+
+async function test15_missingFieldsAndExtremes(): Promise<void> {
+  console.log('\n📌 测试15: 异常输入验证');
+  const socket = SocketIOClient(BASE_URL, { reconnection: false, timeout: 5000 });
+  const wsErrors: any[] = [];
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; resolve(); } };
+    socket.on('connect', () => {
+      socket.emit('device:register', { deviceId: 'e2e-extreme-001' });
+    });
+    socket.on('device:registered', () => {
+      socket.emit('device:location', { longitude: 116.4, latitude: 39.9 });
+    });
+    socket.on('error', (data: any) => { wsErrors.push(data); });
+    setTimeout(done, 3000);
+  });
+  assert(wsErrors.length > 0, '缺少deviceId返回WebSocket错误', `收到错误数: ${wsErrors.length}`);
+  socket.disconnect();
+  const socket2 = SocketIOClient(BASE_URL, { reconnection: false, timeout: 5000 });
+  const wsErrors2: any[] = [];
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; socket2.disconnect(); resolve(); } };
+    socket2.on('connect', () => {
+      socket2.emit('device:register', { deviceId: 'e2e-extreme-001' });
+    });
+    socket2.on('device:registered', () => {
+      socket2.emit('device:location', { deviceId: 'e2e-extreme-001', latitude: 39.9 });
+    });
+    socket2.on('error', (data: any) => { wsErrors2.push(data); });
+    setTimeout(done, 3000);
+  });
+  assert(wsErrors2.length > 0, '缺少longitude返回WebSocket错误', `收到错误数: ${wsErrors2.length}`);
+  const socket3 = SocketIOClient(BASE_URL, { reconnection: false, timeout: 5000 });
+  let extremeAck1 = false;
+  let extremeAck2 = false;
+  const extremeErrors: any[] = [];
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; socket3.disconnect(); resolve(); } };
+    socket3.on('connect', () => {
+      socket3.emit('device:register', { deviceId: 'e2e-extreme-001' });
+    });
+    socket3.on('device:registered', () => {
+      socket3.emit('device:location', { deviceId: 'e2e-extreme-001', longitude: -180, latitude: -90 });
+      setTimeout(() => {
+        socket3.emit('device:location', { deviceId: 'e2e-extreme-001', longitude: 180, latitude: 90 });
+      }, 300);
+    });
+    socket3.on('device:location:ack', (data: any) => {
+      if (data.success) {
+        if (!extremeAck1) extremeAck1 = true;
+        else extremeAck2 = true;
+      }
+    });
+    socket3.on('error', (data: any) => { extremeErrors.push(data); });
+    setTimeout(done, 3000);
+  });
+  assert(extremeAck1, '经度-180纬度-90不报错(合法坐标)', extremeErrors.length > 0 ? `错误: ${extremeErrors[0]?.message}` : '未收到ack');
+  assert(extremeAck2, '经度180纬度90不报错(合法坐标)', extremeErrors.length > 1 ? `错误: ${extremeErrors[1]?.message}` : '未收到ack');
+  const emptyNameRes = await httpPost('/geofences', {
+    name: '', geofenceType: 'circle',
+    circular: { center: [116.4, 39.9], radius: 100 }, alerts: ['enter'], enabled: true,
+  });
+  assert(emptyNameRes.status === 400, '围栏name为空返回400', `实际状态码: ${emptyNameRes.status}`);
+  const zeroRadiusRes = await httpPost('/geofences', {
+    name: '零半径围栏', geofenceType: 'circle',
+    circular: { center: [116.4, 39.9], radius: 0 }, alerts: ['enter'], enabled: true,
+  });
+  assert(zeroRadiusRes.status === 400, '围栏radius为0返回400', `实际状态码: ${zeroRadiusRes.status}`);
+  const hugeRadiusRes = await httpPost('/geofences', {
+    name: '极大半径围栏', geofenceType: 'circle',
+    circular: { center: [116.4, 39.9], radius: 999999 }, alerts: ['enter'], enabled: true,
+  });
+  assert(hugeRadiusRes.status === 201, '围栏radius=999999正常创建返回201', `实际状态码: ${hugeRadiusRes.status}`);
+}
+
 async function runAllTests(): Promise<void> {
   console.log('═══════════════════════════════════════════════════');
   console.log('  物流追踪服务 - 端到端业务逻辑测试');
@@ -388,7 +650,7 @@ async function runAllTests(): Promise<void> {
   try {
     await startInfrastructure();
   } catch (err) {
-    console.error('功能培જ每作头管的:', err);
+    console.error('基础设施启动失败:', err);
     await stopInfrastructure();
     process.exit(1);
   }
@@ -404,12 +666,16 @@ async function runAllTests(): Promise<void> {
     test9_getDeviceRouteGeoJSON,
     test10_geofenceAlertsHistory,
     test11_invalidCoordinatesAndNotFound,
+    test12_bulkLocationPagination,
+    test13_overlappingGeofenceAlerts,
+    test14_deviceDisconnectReconnect,
+    test15_missingFieldsAndExtremes,
   ];
   for (const testFn of tests) {
     try {
       await testFn();
     } catch (err) {
-      console.error('流量，评位:', err);
+      console.error('测试执行异常:', err);
     }
   }
   await stopInfrastructure();
