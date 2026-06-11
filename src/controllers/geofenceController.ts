@@ -195,5 +195,20 @@ export const geofenceController = {
         error: error instanceof Error ? error.message : 'Unknown error'
       });
     }
+  },
+
+  async toggleGeofence(req: Request, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { enabled } = req.body;
+      if (!isValidObjectId(id)) { res.status(400).json({ success: false, message: 'Invalid geofence ID' }); return; }
+      if (typeof enabled !== 'boolean') { res.status(400).json({ success: false, message: 'enabled must be boolean' }); return; }
+      const geofence = await geofenceService.toggleGeofence(id, enabled);
+      if (!geofence) { res.status(404).json({ success: false, message: 'Geofence not found' }); return; }
+      res.json({ success: true, data: geofence });
+    } catch (error) {
+      console.error('Error toggling geofence:', error);
+      res.status(500).json({ success: false, message: 'Failed to toggle geofence' });
+    }
   }
 };

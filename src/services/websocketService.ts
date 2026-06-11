@@ -21,6 +21,7 @@ export class WebSocketService {
   private deviceSockets: Map<string, string> = new Map();
   private socketDevices: Map<string, string> = new Map();
   private deviceLastPing: Map<string, number> = new Map();
+  private deviceLastReport: Map<string, number> = new Map();
   private offlineCheckInterval: NodeJS.Timeout | null = null;
 
   constructor(httpServer: HTTPServer) {
@@ -121,6 +122,14 @@ export class WebSocketService {
   ): Promise<void> {
     const { deviceId, longitude, latitude, altitude = 0, speed = 0, direction = 0, timestamp } = payload;
 
+    const lastReport = this.deviceLastReport.get(deviceId) || 0;
+    const now = Date.now();
+    if (now - lastReport < config.minReportInterval) {
+      socket.emit('error', { message: 'Report too frequent' });
+      return;
+    }
+    this.deviceLastReport.set(deviceId, now);
+
     if (!deviceId || longitude === undefined || latitude === undefined) {
       socket.emit('error', { message: 'deviceId, longitude and latitude are required' });
       return;
@@ -212,6 +221,7 @@ export class WebSocketService {
     if (deviceId) {
       this.socketDevices.delete(socket.id);
       this.deviceSockets.delete(deviceId);
+      this.deviceLastReport.delete(deviceId);
       console.log(`Socket disconnected for device: ${deviceId}`);
     }
     console.log(`Client disconnected: ${socket.id}`);
@@ -231,6 +241,8 @@ export class WebSocketService {
             offlineDevices.push(deviceId);
 
             this.deviceLastPing.delete(deviceId);
+            this.deviceLastReport.delete(deviceId);
+            geofenceService.resetDeviceState(deviceId);
             const socketId = this.deviceSockets.get(deviceId);
             if (socketId) {
               this.deviceSockets.delete(deviceId);

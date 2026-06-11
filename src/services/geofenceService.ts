@@ -220,6 +220,13 @@ export class GeofenceService {
 
     return { alerts, total, page, limit };
   }
+  async toggleGeofence(id: string, enabled: boolean): Promise<IGeofence | null> {
+    return await Geofence.findByIdAndUpdate(id, { enabled }, { new: true });
+  }
+
+  resetDeviceState(deviceId: string): void {
+    this.deviceLastStates.delete(deviceId);
+  }
 }
 
 export const geofenceService = new GeofenceService();

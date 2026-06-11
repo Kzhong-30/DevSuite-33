@@ -309,5 +309,6 @@ router.get('/:id', geofenceController.getGeofence);
  *         description: 地理围栏不存在
  */
 router.get('/:id/alerts', geofenceController.getGeofenceAlerts);
+router.patch('/:id/toggle', geofenceController.toggleGeofence);
 
 export default router;

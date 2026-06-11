@@ -246,9 +246,16 @@ export const deviceController = {
         loc.latitude
       ]);
 
+      let coords = deduplicateCoordinates(coordinates);
+      const tolerance = req.query.tolerance ? parseFloat(req.query.tolerance as string) : 0.0001;
+      if (!isNaN(tolerance) && tolerance >= 0) {
+        coords = douglasPeucker(coords, tolerance);
+      }
+      const simplified = coords.length < coordinates.length;
+
       const lineString = {
         type: 'LineString',
-        coordinates
+        coordinates: coords
       };
 
       res.json({
@@ -258,10 +265,13 @@ export const deviceController = {
           type: 'Feature',
           geometry: lineString,
           properties: {
-            pointCount: coordinates.length,
+            pointCount: coords.length,
             startTime: locations[0].timestamp,
             endTime: locations[locations.length - 1].timestamp,
-            totalDistance: calculateTotalDistance(coordinates)
+            totalDistance: calculateTotalDistance(coords),
+            deduplicated: coordinates.length - coords.length,
+            simplified,
+            originalPointCount: coordinates.length
           }
         }
       });
@@ -302,3 +312,43 @@ function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
 function toRad(value: number): number {
   return (value * Math.PI) / 180;
 }
+function deduplicateCoordinates(coords: number[][]): number[][] {
+  if (coords.length < 2) return coords;
+  const result = [coords[0]];
+  for (let i = 1; i < coords.length; i++) {
+    const [lon1, lat1] = result[result.length - 1];
+    const [lon2, lat2] = coords[i];
+    if (lon1 !== lon2 || lat1 !== lat2) result.push(coords[i]);
+  }
+  return result;
+}
+
+function perpendicularDistance(point: number[], lineStart: number[], lineEnd: number[]): number {
+  const [x, y] = point;
+  const [x1, y1] = lineStart;
+  const [x2, y2] = lineEnd;
+  if (x1 === x2 && y1 === y2) {
+    const dx = x - x1, dy = y - y1;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+  const dx = x2 - x1, dy = y2 - y1;
+  const num = Math.abs(dy * x - dx * y + x2 * y1 - y2 * x1);
+  const den = Math.sqrt(dy * dy + dx * dx);
+  return num / den;
+}
+
+function douglasPeucker(coords: number[][], tolerance: number): number[][] {
+  if (coords.length < 3) return coords;
+  let maxDist = 0, index = 0;
+  for (let i = 1; i < coords.length - 1; i++) {
+    const dist = perpendicularDistance(coords[i], coords[0], coords[coords.length - 1]);
+    if (dist > maxDist) { maxDist = dist; index = i; }
+  }
+  if (maxDist > tolerance) {
+    const left = douglasPeucker(coords.slice(0, index + 1), tolerance);
+    const right = douglasPeucker(coords.slice(index), tolerance);
+    return left.slice(0, -1).concat(right);
+  }
+  return [coords[0], coords[coords.length - 1]];
+}
+
