@@ -131,6 +131,13 @@ export class WebSocketService {
       return;
     }
 
+    if (timestamp !== undefined) {
+      if (typeof timestamp !== 'number' || isNaN(timestamp) || timestamp < 0) {
+        socket.emit('error', { message: 'Invalid timestamp' });
+        return;
+      }
+    }
+
     const locationData = {
       deviceId,
       longitude,

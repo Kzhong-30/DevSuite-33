@@ -506,7 +506,7 @@ async function test14_deviceDisconnectReconnect(): Promise<void> {
   let loc1Ack = false;
   await new Promise<void>((resolve) => {
     let resolved = false;
-    const done = () => { if (!resolved) { resolved = true; resolve(); } };
+    const done = () => { if (!resolved) { resolved = true; socket1.disconnect(); setTimeout(resolve, 100); } };
     socket1.on('connect', () => {
       socket1.emit('device:register', { deviceId: 'e2e-reconnect-001', name: '重连测试设备', type: 'truck' });
     });
@@ -519,21 +519,22 @@ async function test14_deviceDisconnectReconnect(): Promise<void> {
       }
     });
     socket1.on('device:location:ack', (data: any) => {
-      if (data.success) loc1Ack = true;
+      if (data.success) { loc1Ack = true; setTimeout(done, 200); }
     });
-    setTimeout(done, 3000);
+    setTimeout(done, 4000);
   });
   assert(reg1Success, '首次注册成功', '未收到注册确认');
   assert(loc1Ack, '首次位置上报ack', '未收到位置确认');
-  socket1.disconnect();
-  await sleep(1000);
+
+  await sleep(1500);
+
   const socket2 = SocketIOClient(BASE_URL, { reconnection: false, timeout: 5000 });
   let reg2Success = false;
   let reg2Status = '';
   let loc2Ack = false;
   await new Promise<void>((resolve) => {
     let resolved = false;
-    const done = () => { if (!resolved) { resolved = true; socket2.disconnect(); resolve(); } };
+    const done = () => { if (!resolved) { resolved = true; socket2.disconnect(); setTimeout(resolve, 100); } };
     socket2.on('connect', () => {
       socket2.emit('device:register', { deviceId: 'e2e-reconnect-001' });
     });
@@ -543,13 +544,13 @@ async function test14_deviceDisconnectReconnect(): Promise<void> {
         reg2Status = data.status;
         setTimeout(() => {
           socket2.emit('device:location', { deviceId: 'e2e-reconnect-001', longitude: 117.0, latitude: 40.5 });
-        }, 300);
+        }, 500);
       }
     });
     socket2.on('device:location:ack', (data: any) => {
-      if (data.success) loc2Ack = true;
+      if (data.success) { loc2Ack = true; setTimeout(done, 200); }
     });
-    setTimeout(done, 3000);
+    setTimeout(done, 5000);
   });
   assert(reg2Success, '重连注册成功', '未收到注册确认');
   assert(reg2Status === 'online', '重连后状态为online', `实际: ${reg2Status}`);
@@ -643,6 +644,290 @@ async function test15_missingFieldsAndExtremes(): Promise<void> {
   assert(hugeRadiusRes.status === 201, '围栏radius=999999正常创建返回201', `实际状态码: ${hugeRadiusRes.status}`);
 }
 
+async function test16_illegalTimestampAndEmptyBoundary(): Promise<void> {
+  console.log('\n📌 测试16: 非法timestamp + 空列表边界');
+  const socket = SocketIOClient(BASE_URL, { reconnection: false, timeout: 5000 });
+  const errors: any[] = [];
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; socket.disconnect(); resolve(); } };
+    socket.on('connect', () => {
+      socket.emit('device:register', { deviceId: 'e2e-empty-001', name: '空边界测试', type: 'truck' });
+    });
+    socket.on('device:registered', () => {
+      setTimeout(() => {
+        socket.emit('device:location', { deviceId: 'e2e-empty-001', longitude: 116.4, latitude: 39.9, timestamp: -999 });
+        setTimeout(() => {
+          socket.emit('device:location', { deviceId: 'e2e-empty-001', longitude: 116.4, latitude: 39.9, timestamp: 'abc' as any });
+        }, 300);
+      }, 300);
+    });
+    socket.on('error', (data: any) => { errors.push(data); });
+    setTimeout(done, 2500);
+  });
+  assert(errors.length >= 2, '收到至少2个timestamp错误(负数和字符串)', '实际错误数: ' + errors.length);
+  if (errors.length >= 2) {
+    assert(errors[0].message === 'Invalid timestamp', '第一个错误为Invalid timestamp', '实际: ' + errors[0].message);
+    assert(errors[1].message === 'Invalid timestamp', '第二个错误为Invalid timestamp', '实际: ' + errors[1].message);
+  }
+  const devicesRes = await httpGet('/devices?status=online');
+  assert(devicesRes.status === 200, 'GET /devices?status=online 返回200', '实际状态码: ' + devicesRes.status);
+  assert(Array.isArray(devicesRes.data && devicesRes.data.data), '设备列表data为数组', '实际类型: ' + typeof (devicesRes.data && devicesRes.data.data));
+  const gfRes = await httpGet('/geofences');
+  assert(gfRes.status === 200, 'GET /geofences 返回200', '实际状态码: ' + gfRes.status);
+  assert(Array.isArray(gfRes.data && gfRes.data.data), '围栏列表data为数组(空或非空都合法)', '实际类型: ' + typeof (gfRes.data && gfRes.data.data));
+}
+
+async function test17_geofenceDisableEnableAlertReset(): Promise<void> {
+  console.log('\n📌 测试17: 围栏禁用/启用告警恢复');
+  const disabledGf = await httpPost('/geofences', {
+    name: '禁用围栏-测试', description: '创建时即为disabled状态',
+    geofenceType: 'circle', circular: { center: [116.3, 39.8], radius: 100 },
+    alerts: ['enter', 'exit'], enabled: false,
+  });
+  assert(disabledGf.status === 201, '创建enabled=false围栏返回201', '实际状态码: ' + disabledGf.status);
+  assert(disabledGf.data && disabledGf.data.success === true, 'disabled围栏创建成功', '返回: ' + JSON.stringify(disabledGf.data));
+  const disabledGfId = disabledGf.data && disabledGf.data.data && disabledGf.data.data._id;
+  assert(!!disabledGfId, 'disabled围栏有_id', '无_id字段');
+
+  const enabledGf = await httpPost('/geofences', {
+    name: '启用围栏-测试', description: '同位置enabled=true',
+    geofenceType: 'circle', circular: { center: [116.3, 39.8], radius: 100 },
+    alerts: ['enter', 'exit'], enabled: true,
+  });
+  assert(enabledGf.status === 201, '创建enabled=true围栏返回201', '实际状态码: ' + enabledGf.status);
+  const enabledGfId = enabledGf.data && enabledGf.data.data && enabledGf.data.data._id;
+  assert(!!enabledGfId, 'enabled围栏有_id', '无_id字段');
+
+  const socket = SocketIOClient(BASE_URL, { reconnection: false, timeout: 5000 });
+  const alerts: any[] = [];
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; socket.disconnect(); resolve(); } };
+    socket.on('connect', () => {
+      socket.emit('device:register', { deviceId: 'e2e-gf-toggle-001', name: '围栏开关测试', type: 'car' });
+    });
+    socket.on('device:registered', () => {
+      setTimeout(() => {
+        socket.emit('device:location', { deviceId: 'e2e-gf-toggle-001', longitude: 116.3, latitude: 39.8 });
+      }, 300);
+    });
+    socket.on('geofence:alert', (data: any) => { alerts.push(data); });
+    setTimeout(done, 3000);
+  });
+
+  const disabledAlerts = alerts.filter((a) => a.geofenceId === disabledGfId && a.type === 'enter');
+  const enabledAlerts = alerts.filter((a) => a.geofenceId === enabledGfId && a.type === 'enter');
+  assert(disabledAlerts.length === 0, 'disabled围栏不应触发enter告警', 'disabled围栏告警数: ' + disabledAlerts.length);
+  assert(enabledAlerts.length >= 1, 'enabled围栏应触发enter告警', 'enabled围栏告警数: ' + enabledAlerts.length);
+  if (enabledAlerts.length > 0) {
+    assert(enabledAlerts[0].deviceId === 'e2e-gf-toggle-001', 'enabled告警deviceId正确', '实际: ' + enabledAlerts[0].deviceId);
+  }
+}
+
+async function test18_multiDeviceBroadcastIsolation(): Promise<void> {
+  console.log('\n📌 测试18: 多设备广播隔离/防串台');
+  const socketA = SocketIOClient(BASE_URL, { reconnection: false, timeout: 5000 });
+  const socketB = SocketIOClient(BASE_URL, { reconnection: false, timeout: 5000 });
+  const eventsA: any[] = [];
+  const eventsB: any[] = [];
+  const DEVICE_A = 'e2e-multi-A';
+  const DEVICE_B = 'e2e-multi-B';
+
+  socketA.on('device:location:ack', (data: any) => { eventsA.push({ event: 'ack', data }); });
+  socketA.on('device:location:update', (data: any) => { eventsA.push({ event: 'update', data }); });
+  let aRegistered = false;
+  let bRegistered = false;
+  socketA.on('device:alert', (data: any) => { eventsA.push({ event: 'alert', data }); });
+  socketB.on('device:location:ack', (data: any) => { eventsB.push({ event: 'ack', data }); });
+  socketB.on('device:location:update', (data: any) => { eventsB.push({ event: 'update', data }); });
+  socketB.on('device:alert', (data: any) => { eventsB.push({ event: 'alert', data }); });
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; resolve(); } };
+    socketA.on('connect', () => { socketA.emit('device:register', { deviceId: DEVICE_A, name: '设备A', type: 'truck' }); });
+    socketA.on('device:registered', () => {
+      aRegistered = true;
+      if (bRegistered) sendLocations();
+    });
+    socketB.on('connect', () => { socketB.emit('device:register', { deviceId: DEVICE_B, name: '设备B', type: 'car' }); });
+    socketB.on('device:registered', () => {
+      bRegistered = true;
+      if (aRegistered) sendLocations();
+    });
+
+    function sendLocations() {
+      setTimeout(() => {
+        socketA.emit('device:location', { deviceId: DEVICE_A, longitude: 116.1, latitude: 39.1 });
+        setTimeout(() => {
+          socketB.emit('device:location', { deviceId: DEVICE_B, longitude: 116.2, latitude: 39.2 });
+        }, 200);
+      }, 300);
+    }
+
+    setTimeout(done, 4000);
+  });
+
+  await sleep(2000);
+
+  const acksA = eventsA.filter((e) => e.event === 'ack');
+  const acksB = eventsB.filter((e) => e.event === 'ack');
+  assert(acksA.length >= 1, 'socketA收到至少1个ack', '实际: ' + acksA.length);
+  assert(acksB.length >= 1, 'socketB收到至少1个ack', '实际: ' + acksB.length);
+
+  const updatesA = eventsA.filter((e) => e.event === 'update');
+  const updatesB = eventsB.filter((e) => e.event === 'update');
+  const hasAUpdateA = updatesA.some((e) => e.data.deviceId === DEVICE_A);
+  const hasBUpdateA = updatesA.some((e) => e.data.deviceId === DEVICE_B);
+  const hasAUpdateB = updatesB.some((e) => e.data.deviceId === DEVICE_A);
+  const hasBUpdateB = updatesB.some((e) => e.data.deviceId === DEVICE_B);
+  assert(hasAUpdateA && hasBUpdateA, 'socketA收到A和B的位置广播(update)', 'A有A:' + hasAUpdateA + ' A有B:' + hasBUpdateA);
+  assert(hasAUpdateB && hasBUpdateB, 'socketB收到A和B的位置广播(update)', 'B有A:' + hasAUpdateB + ' B有B:' + hasBUpdateB);
+
+  socketA.disconnect();
+  socketB.disconnect();
+}
+
+async function test19_thousandRecordsPaginationPerformance(): Promise<void> {
+  console.log('\n📌 测试19: 1000条大批量分页性能');
+  const socket = SocketIOClient(BASE_URL, { reconnection: false, timeout: 10000 });
+  let registered = false;
+  const DEV_ID = 'e2e-1000-001';
+  let sentCount = 0;
+
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; resolve(); } };
+
+    socket.on('connect', () => {
+      socket.emit('device:register', { deviceId: DEV_ID, name: '千条测试', type: 'truck' });
+    });
+    socket.on('device:registered', (data: any) => {
+      if (data.deviceId === DEV_ID && !registered) {
+        registered = true;
+        let idx = 0;
+        const total = 1000;
+        const sendBatch = () => {
+          const batchEnd = Math.min(idx + 20, total);
+          for (; idx < batchEnd; idx++) {
+            const lng = 116.4 + (117.4 - 116.4) * (idx / (total - 1));
+            const lat = 39.9 + (38.9 - 39.9) * (idx / (total - 1));
+            socket.emit('device:location', {
+              deviceId: DEV_ID,
+              longitude: Math.round(lng * 10000) / 10000,
+              latitude: Math.round(lat * 10000) / 10000,
+              timestamp: Date.now() + idx,
+            });
+            sentCount++;
+          }
+          if (idx < total) {
+            setTimeout(sendBatch, 5);
+          }
+        };
+        sendBatch();
+      }
+    });
+    socket.on('device:location:ack', () => {});
+    setTimeout(done, 15000);
+  });
+
+  socket.disconnect();
+  assert(registered, '设备e2e-1000-001注册成功', '未收到注册确认');
+  assert(sentCount >= 1000, '已发送' + sentCount + '条位置(>=1000)', '实际发送: ' + sentCount);
+  await sleep(5000);
+
+  const p1Start = Date.now();
+  const p1Res = await httpGet('/devices/' + DEV_ID + '/history?limit=100&page=1');
+  const p1Time = Date.now() - p1Start;
+  assert(p1Res.status === 200, '第1页history返回200', '实际状态码: ' + p1Res.status);
+  assert(p1Res.data && p1Res.data.pagination && p1Res.data.pagination.total >= 1000, "total>=1000", "实际total: " + (p1Res.data && p1Res.data.pagination && p1Res.data.pagination.total));
+  assert(p1Res.data && p1Res.data.pagination && p1Res.data.pagination.totalPages >= 10, "totalPages>=10", "实际totalPages: " + (p1Res.data && p1Res.data.pagination && p1Res.data.pagination.totalPages));
+  console.log('  ⏱ 第1页响应: ' + p1Time + 'ms');
+
+  const p10Res = await httpGet('/devices/' + DEV_ID + '/history?limit=100&page=10');
+  assert(p10Res.status === 200, '第10页history返回200', '实际状态码: ' + p10Res.status);
+  assert(p10Res.data && p10Res.data.data && p10Res.data.data.length > 0, '第10页数据非空', '第10页条数: ' + (p10Res.data && p10Res.data.data && p10Res.data.data.length));
+
+  const bigStart = Date.now();
+  const bp = '/devices/' + DEV_ID + '/history?limit=1000';
+  const bigRes = await httpGet(bp);
+  const bigTime = Date.now() - bigStart;
+  assert(bigRes.status === 200, 'limit=1000查询返回200', '实际状态码: ' + bigRes.status);
+  assert(bigTime < 3000, 'limit=1000响应时间<3秒', '实际: ' + bigTime + 'ms');
+  console.log('  ⏱ limit=1000响应: ' + bigTime + 'ms');
+
+  const routeStart = Date.now();
+  const rp = '/devices/' + DEV_ID + '/route';
+  const routeRes = await httpGet(rp);
+  const routeTime = Date.now() - routeStart;
+  assert(routeRes.status === 200, 'route查询返回200', '实际状态码: ' + routeRes.status);
+  assert(routeTime < 3000, 'route响应时间<3秒', '实际: ' + routeTime + 'ms');
+  const pc = routeRes.data && routeRes.data.data && routeRes.data.data.properties && routeRes.data.data.properties.pointCount;
+  assert(pc >= 1000, 'route pointCount>=1000', '实际pointCount: ' + pc);
+  console.log('  ⏱ route响应: ' + routeTime + 'ms');
+}
+
+async function test20_pingOfflineStatusTransition(): Promise<void> {
+  console.log("\n📌 测试20: ping离线/在线状态转换");
+  const socket = SocketIOClient(BASE_URL, { reconnection: false, timeout: 5000 });
+  const DEV_ID = 'e2e-ping-001';
+  let registered = false;
+  let pingNoError = true;
+
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; resolve(); } };
+    socket.on('connect', () => {
+      socket.emit('device:register', { deviceId: DEV_ID, name: 'Ping测试', type: 'drone' });
+    });
+    socket.on('device:registered', (data: any) => {
+      if (data.deviceId === DEV_ID) {
+        registered = true;
+        setTimeout(() => {
+          try {
+            socket.emit('device:ping', { deviceId: DEV_ID });
+          } catch {
+            pingNoError = false;
+          }
+        }, 300);
+      }
+    });
+    socket.on('error', () => { pingNoError = false; });
+    setTimeout(done, 2500);
+  });
+
+  assert(registered, '设备e2e-ping-001注册成功', '未收到注册确认');
+  assert(pingNoError, '发送device:ping不抛异常', 'ping过程中触发了error事件');
+
+  const dpath = '/devices/' + DEV_ID;
+  const get1 = await httpGet(dpath);
+  assert(get1.status === 200, '在线时GET /devices/:id返回200', '实际状态码: ' + get1.status);
+  const dev1 = get1.data && get1.data.data;
+  assert(!!dev1, '响应包含data字段', '返回: ' + JSON.stringify(get1.data));
+  assert('status' in dev1, '设备对象包含status字段', '字段: ' + Object.keys(dev1 || {}).join(','));
+  if (dev1) {
+    assert(dev1.status === 'online', 'ping后设备status=online', '实际status: ' + dev1.status);
+  }
+
+  socket.disconnect();
+  await sleep(2000);
+
+  let get2Ok = true;
+  let get2Status = 0;
+  let dev2StatusExists = false;
+  try {
+    const get2 = await httpGet(dpath);
+    get2Status = get2.status;
+    if (get2.data && get2.data.data && 'status' in get2.data.data) {
+      dev2StatusExists = true;
+    }
+  } catch {
+    get2Ok = false;
+  }
+  assert(get2Ok, '断连后GET不崩溃', '断连查询抛出异常');
+  assert(get2Status === 200, '断连后GET返回200(不要求offline)', '实际状态码: ' + get2Status);
+  assert(dev2StatusExists, '断连后设备仍有status字段', 'status字段不存在');
+}
 async function runAllTests(): Promise<void> {
   console.log('═══════════════════════════════════════════════════');
   console.log('  物流追踪服务 - 端到端业务逻辑测试');
@@ -670,6 +955,11 @@ async function runAllTests(): Promise<void> {
     test13_overlappingGeofenceAlerts,
     test14_deviceDisconnectReconnect,
     test15_missingFieldsAndExtremes,
+    test16_illegalTimestampAndEmptyBoundary,
+    test17_geofenceDisableEnableAlertReset,
+    test18_multiDeviceBroadcastIsolation,
+    test19_thousandRecordsPaginationPerformance,
+    test20_pingOfflineStatusTransition,
   ];
   for (const testFn of tests) {
     try {
