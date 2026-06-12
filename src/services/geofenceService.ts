@@ -1,5 +1,6 @@
 import { Geofence, IGeofence } from '../models/Geofence';
 import { Alert as AlertModel, IAlert, AlertEventType } from '../models/Alert';
+import { Device } from '../models/Device';
 import { Types } from 'mongoose';
 
 export interface LocationPoint {
@@ -221,11 +222,52 @@ export class GeofenceService {
     return { alerts, total, page, limit };
   }
   async toggleGeofence(id: string, enabled: boolean): Promise<IGeofence | null> {
-    return await Geofence.findByIdAndUpdate(id, { enabled }, { new: true });
+    const geofence = await Geofence.findByIdAndUpdate(id, { enabled }, { new: true });
+    if (!geofence) return null;
+    if (enabled) {
+      const onlineDevices = await Device.find({ status: 'online' });
+      for (const dev of onlineDevices) {
+        const latestLocation = await require('../models/Location').Location
+          .findOne({ deviceId: dev.deviceId })
+          .sort({ timestamp: -1 })
+          .limit(1);
+        if (!latestLocation) continue;
+        const lng = latestLocation.longitude;
+        const lat = latestLocation.latitude;
+        if (lng === undefined || lat === undefined) continue;
+        const point = { longitude: lng, latitude: lat, deviceId: dev.deviceId };
+        const inside = this.isDeviceInGeofence(point, geofence);
+        if (inside && geofence.alerts.includes('enter')) {
+          const ls = this.deviceLastStates.get(dev.deviceId) || new Set();
+          ls.add(String(geofence._id));
+          this.deviceLastStates.set(dev.deviceId, ls);
+          const alert = await AlertModel.create({
+            geofenceId: geofence._id,
+            deviceId: dev.deviceId,
+            type: 'enter',
+            message: '设备 ' + dev.deviceId + ' 进入围栏 ' + geofence.name,
+            location: { type: 'Point', coordinates: [lng, lat] },
+            timestamp: new Date(),
+            read: false
+          });
+          const io = (this as any).io;
+          if (io) {
+            const alertData = alert.toObject ? alert.toObject() : alert;
+            io.emit('geofence:alert', alertData);
+            io.to('device:' + dev.deviceId).emit('device:alert', alertData);
+          }
+        }
+      }
+    }
+    return geofence;
   }
 
   resetDeviceState(deviceId: string): void {
     this.deviceLastStates.delete(deviceId);
+  }
+
+  setIo(io: any): void {
+    (this as any).io = io;
   }
 }
 

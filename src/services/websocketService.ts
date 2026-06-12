@@ -5,6 +5,7 @@ import { Location, ILocation } from '../models/Location';
 import { geofenceService } from './geofenceService';
 import { config } from '../config';
 import { IAlert } from '../models/Alert';
+import { generateToken } from '../utils/auth';
 
 export interface LocationPayload {
   deviceId: string;
@@ -14,6 +15,7 @@ export interface LocationPayload {
   speed?: number;
   direction?: number;
   timestamp?: number;
+  deviceToken?: string;
 }
 
 export class WebSocketService {
@@ -23,6 +25,8 @@ export class WebSocketService {
   private deviceLastPing: Map<string, number> = new Map();
   private deviceLastReport: Map<string, number> = new Map();
   private offlineCheckInterval: NodeJS.Timeout | null = null;
+  private ipConnectionCount: Map<string, number> = new Map();
+  private totalConnections: number = 0;
 
   constructor(httpServer: HTTPServer) {
     this.io = new Server(httpServer, {
@@ -34,11 +38,30 @@ export class WebSocketService {
 
     this.setupListeners();
     this.startOfflineCheck();
+    geofenceService.setIo(this.io);
   }
 
   private setupListeners(): void {
     this.io.on('connection', (socket: Socket) => {
       console.log(`Client connected: ${socket.id}`);
+
+
+      if (this.totalConnections >= config.maxConnections) {
+        socket.emit('error', { message: 'Server at max capacity' });
+        socket.disconnect(true);
+        return;
+      }
+      const rawIp = (socket.handshake.headers && socket.handshake.headers['x-forwarded-for']) ? String(socket.handshake.headers['x-forwarded-for']).split(',')[0].trim() : socket.handshake.address;
+      const clientIp = rawIp || 'unknown';
+      const ipCount = this.ipConnectionCount.get(clientIp) || 0;
+      if (ipCount >= config.maxConnectionsPerIp) {
+        socket.emit('error', { message: 'Too many connections from this IP' });
+        socket.disconnect(true);
+        return;
+      }
+      this.totalConnections++;
+      this.ipConnectionCount.set(clientIp, ipCount + 1);
+      (socket as any)._clientIp = clientIp;
 
       socket.on('device:register', async (payload: { deviceId: string; name?: string; type?: string }) => {
         await this.handleDeviceRegister(socket, payload);
@@ -48,8 +71,8 @@ export class WebSocketService {
         await this.handleDeviceLocation(socket, payload);
       });
 
-      socket.on('device:ping', (payload: { deviceId: string }) => {
-        this.handleDevicePing(payload.deviceId);
+      socket.on('device:ping', async (payload: { deviceId: string; deviceToken?: string }) => {
+        await this.handleDevicePing(socket, payload);
       });
 
       socket.on('client:subscribe', (rooms: string | string[]) => {
@@ -77,10 +100,12 @@ export class WebSocketService {
 
     let device = await Device.findOne({ deviceId });
     if (!device) {
+      const token = generateToken();
       device = await Device.create({
         deviceId,
         name: name || deviceId,
         type: type || 'truck',
+          deviceToken: token,
         status: 'online',
         lastSeen: new Date()
       });
@@ -89,6 +114,7 @@ export class WebSocketService {
       device.lastSeen = new Date();
       if (name) device.name = name;
       if (type) device.type = type;
+        if (!device.deviceToken) device.deviceToken = generateToken();
       await device.save();
     }
 
@@ -105,7 +131,7 @@ export class WebSocketService {
     this.deviceLastPing.set(deviceId, Date.now());
 
     socket.join(`device:${deviceId}`);
-    socket.emit('device:registered', { deviceId: device.deviceId, status: 'online' });
+    socket.emit('device:registered', { deviceId: device.deviceId, status: 'online', token: device.deviceToken });
 
     this.io.emit('device:status', {
       deviceId: device.deviceId,
@@ -120,7 +146,12 @@ export class WebSocketService {
     socket: Socket,
     payload: LocationPayload
   ): Promise<void> {
-    const { deviceId, longitude, latitude, altitude = 0, speed = 0, direction = 0, timestamp } = payload;
+    const { deviceId, longitude, latitude, altitude = 0, speed = 0, direction = 0, timestamp, deviceToken } = payload;
+    const dev = await Device.findOne({ deviceId });
+    if (!deviceToken || dev!.deviceToken !== deviceToken) {
+      socket.emit("error", { message: "Invalid or missing token" });
+      return;
+    }
 
     const lastReport = this.deviceLastReport.get(deviceId) || 0;
     const now = Date.now();
@@ -212,11 +243,25 @@ export class WebSocketService {
     }
   }
 
-  private handleDevicePing(deviceId: string): void {
+
+  private async handleDevicePing(socket: Socket, payload: { deviceId: string; deviceToken?: string }): Promise<void> {
+    const { deviceId, deviceToken } = payload;
+    const dev = await Device.findOne({ deviceId });
+    if (!deviceToken || dev!.deviceToken !== deviceToken) {
+      socket.emit("error", { message: "Invalid or missing token" });
+      return;
+    }
     this.deviceLastPing.set(deviceId, Date.now());
   }
 
   private handleDisconnect(socket: Socket): void {
+    if (this.totalConnections > 0) this.totalConnections--;
+    const clientIp = (socket as any)._clientIp;
+    if (clientIp) {
+      const cnt = this.ipConnectionCount.get(clientIp) || 0;
+      if (cnt > 1) this.ipConnectionCount.set(clientIp, cnt - 1);
+      else this.ipConnectionCount.delete(clientIp);
+    }
     const deviceId = this.socketDevices.get(socket.id);
     if (deviceId) {
       this.socketDevices.delete(socket.id);

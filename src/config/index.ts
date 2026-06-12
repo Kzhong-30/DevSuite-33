@@ -3,5 +3,7 @@ export const config = {
   mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/logistics_tracking',
   deviceOfflineTimeout: parseInt(process.env.DEVICE_OFFLINE_TIMEOUT || '30000'),
   corsOrigin: process.env.CORS_ORIGIN || '*',
-  minReportInterval: parseInt(process.env.MIN_REPORT_INTERVAL || '100')
+  minReportInterval: parseInt(process.env.MIN_REPORT_INTERVAL || '100'),
+  maxConnections: parseInt(process.env.MAX_CONNECTIONS || '10000'),
+  maxConnectionsPerIp: parseInt(process.env.MAX_CONNECTIONS_PER_IP || '100')
 };

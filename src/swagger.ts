@@ -79,6 +79,10 @@ const swaggerOptions: swaggerJsdoc.Options = {
       {
         name: 'Geofences',
         description: '地理围栏与告警管理'
+      },
+      {
+        name: 'Alerts',
+        description: '告警管理'
       }
     ],
     paths: {}

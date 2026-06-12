@@ -4,6 +4,7 @@ export interface IDevice extends Document {
   deviceId: string;
   name: string;
   type: string;
+  deviceToken: string;
   status: 'online' | 'offline';
   lastSeen: Date;
   createdAt: Date;
@@ -25,6 +26,11 @@ const DeviceSchema = new Schema<IDevice>(
     type: {
       type: String,
       default: 'truck'
+    },
+    deviceToken: {
+      type: String,
+      required: true,
+      index: true
     },
     status: {
       type: String,
