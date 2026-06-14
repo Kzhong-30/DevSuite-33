@@ -80,7 +80,7 @@ router.get('/', deviceController.getAllDevices);
 
 /**
  * @swagger
- * /devices/{id}:
+ * /api/devices/{id}:
  *   get:
  *     summary: 获取单个设备信息
  *     tags: [Devices]
@@ -101,7 +101,7 @@ router.get('/:id', deviceController.getDevice);
 
 /**
  * @swagger
- * /devices/{id}/location:
+ * /api/devices/{id}/location:
  *   get:
  *     summary: 获取设备最新位置
  *     tags: [Devices]
@@ -131,7 +131,7 @@ router.get('/:id/location', deviceController.getDeviceLocation);
 
 /**
  * @swagger
- * /devices/{id}/history:
+ * /api/devices/{id}/history:
  *   get:
  *     summary: 获取设备历史轨迹
  *     tags: [Devices]
@@ -166,6 +166,37 @@ router.get('/:id/location', deviceController.getDeviceLocation);
  *           type: integer
  *           default: 100
  *         description: 每页数量 (最大1000)
+ *       - in: query
+ *         name: deduplicate
+ *         schema:
+ *           type: boolean
+ *           default: false
+ *         description: 是否对坐标做相邻去重
+ *       - in: query
+ *         name: tolerance
+ *         schema:
+ *           type: number
+ *           default: 0
+ *         description: Douglas-Peucker简化容差（0表示不简化）
+ *       - in: query
+ *         name: format
+ *         schema:
+ *           type: string
+ *           enum: [default, geojson]
+ *           default: default
+ *         description: 返回格式，default为数组格式，geojson为GeoJSON FeatureCollection
+ *       - in: query
+ *         name: dedup
+ *         schema:
+ *           type: boolean
+ *           default: false
+ *         description: 是否对坐标做相邻去重（同deduplicate）
+ *       - in: query
+ *         name: simplify
+ *         schema:
+ *           type: boolean
+ *           default: false
+ *         description: 是否启用轨迹简化（需配合tolerance参数使用）
  *     responses:
  *       200:
  *         description: 历史轨迹数据
@@ -198,7 +229,7 @@ router.get('/:id/history', deviceController.getDeviceHistory);
 
 /**
  * @swagger
- * /devices/{id}/route:
+ * /api/devices/{id}/route:
  *   get:
  *     summary: 获取两点间行驶路线 (GeoJSON LineString)
  *     tags: [Devices]
@@ -215,6 +246,27 @@ router.get('/:id/history', deviceController.getDeviceHistory);
  *           type: string
  *           format: date-time
  *         description: 开始时间 (ISO格式)
+ *       - in: query
+ *         name: end
+ *         schema:
+ *       - in: query
+ *         name: tolerance
+ *         schema:
+ *           type: number
+ *           default: 0.0001
+ *         description: Douglas-Peucker简化容差，值越大简化程度越高
+ *       - in: query
+ *         name: dedup
+ *         schema:
+ *           type: boolean
+ *           default: true
+ *         description: 是否对坐标做相邻去重
+ *       - in: query
+ *         name: simplify
+ *         schema:
+ *           type: boolean
+ *           default: true
+ *         description: 是否启用轨迹简化
  *       - in: query
  *         name: end
  *         schema:
@@ -268,5 +320,37 @@ router.get('/:id/history', deviceController.getDeviceHistory);
  *         description: 设备或路线数据不存在
  */
 router.get('/:id/route', deviceController.getDeviceRoute);
+
+/**
+ * @swagger
+ * /api/devices/{id}:
+ *   delete:
+ *     summary: 注销/删除设备（清理所有关联数据）
+ *     tags: [Devices]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: 设备ID
+ *     responses:
+ *       200:
+ *         description: 设备注销成功，所有关联数据已清理
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *       404:
+ *         description: 设备不存在
+ */
+router.delete('/:id', deviceController.deleteDevice);
 
 export default router;

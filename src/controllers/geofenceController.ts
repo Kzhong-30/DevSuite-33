@@ -210,5 +210,108 @@ export const geofenceController = {
       console.error('Error toggling geofence:', error);
       res.status(500).json({ success: false, message: 'Failed to toggle geofence' });
     }
+  },
+
+  async markAlertRead(req: Request, res: Response): Promise<void> {
+    try {
+      const { id, alertId } = req.params;
+      if (!isValidObjectId(alertId)) { res.status(400).json({ success: false, message: 'Invalid alert ID' }); return; }
+      const AlertModel = require('../models/Alert').Alert;
+      const alert = await AlertModel.findByIdAndUpdate(alertId, { read: true }, { new: true });
+      if (!alert) { res.status(404).json({ success: false, message: 'Alert not found' }); return; }
+      res.json({ success: true, data: alert });
+    } catch (error) {
+      console.error('Error marking alert read:', error);
+      res.status(500).json({ success: false, message: 'Failed to mark alert as read' });
+    }
+  },
+
+  async batchCreateGeofences(req: Request, res: Response): Promise<void> {
+    try {
+      const { geofences } = req.body;
+      if (!Array.isArray(geofences) || geofences.length === 0) { res.status(400).json({ success: false, message: 'geofences must be non-empty array' }); return; }
+      if (geofences.length > 100) { res.status(400).json({ success: false, message: 'Maximum 100 geofences per batch' }); return; }
+      const created = [];
+      for (const g of geofences) {
+        const result = await geofenceService.createGeofence({
+          name: g.name,
+          description: g.description,
+          geofenceType: g.geofenceType,
+          circular: g.circular ? { center: g.circular.center, radius: g.circular.radius } : undefined,
+          polygon: g.polygon ? { coordinates: g.polygon.coordinates } : undefined,
+          alerts: g.alerts,
+          enabled: g.enabled
+        });
+        created.push(result);
+      }
+      res.status(201).json({ success: true, count: created.length, data: created });
+    } catch (error) {
+      console.error('Batch create error:', error);
+      res.status(500).json({ success: false, message: 'Failed to batch create geofences' });
+    }
+  },
+
+  async batchToggleGeofences(req: Request, res: Response): Promise<void> {
+    try {
+      const { ids, enabled } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) { res.status(400).json({ success: false, message: 'ids must be non-empty array' }); return; }
+      if (typeof enabled !== 'boolean') { res.status(400).json({ success: false, message: 'enabled must be boolean' }); return; }
+      const GeofenceModel = require('../models/Geofence').Geofence;
+      const result = await GeofenceModel.updateMany({ _id: { $in: ids } }, { enabled });
+      if (enabled) {
+        const onlineDevices = await require('../models/Device').Device.find({ status: 'online' });
+        for (const id of ids) {
+          const geofence = await GeofenceModel.findById(id);
+          if (!geofence) continue;
+          for (const dev of onlineDevices) {
+            const latestLocation = await require('../models/Location').Location
+              .findOne({ deviceId: dev.deviceId })
+              .sort({ timestamp: -1 })
+              .limit(1);
+            if (!latestLocation) continue;
+            const lng = latestLocation.longitude;
+            const lat = latestLocation.latitude;
+            if (lng === undefined || lat === undefined) continue;
+            const point = { longitude: lng, latitude: lat, deviceId: dev.deviceId };
+            const inside = geofenceService['isDeviceInGeofence'](point, geofence);
+            if (inside && geofence.alerts.includes('enter')) {
+              const AlertModel = require('../models/Alert').Alert;
+              await AlertModel.create({
+                geofenceId: geofence._id,
+                deviceId: dev.deviceId,
+                type: 'enter',
+                message: '设备 ' + dev.deviceId + ' 进入围栏 ' + geofence.name,
+                location: { type: 'Point', coordinates: [lng, lat] },
+                timestamp: new Date(),
+                read: false
+              });
+            }
+          }
+        }
+      }
+      res.json({ success: true, data: { modifiedCount: result.modifiedCount } });
+    } catch (error) {
+      console.error('Batch toggle error:', error);
+      res.status(500).json({ success: false, message: 'Failed to batch toggle' });
+    }
+  },
+
+  async batchDeleteGeofences(req: Request, res: Response): Promise<void> {
+    try {
+      const { ids } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) { res.status(400).json({ success: false, message: 'ids must be non-empty array' }); return; }
+      for (const id of ids) {
+        if (!isValidObjectId(id)) { res.status(400).json({ success: false, message: 'Invalid geofence ID: ' + id }); return; }
+      }
+      const GeofenceModel = require('../models/Geofence').Geofence;
+      const AlertModel = require('../models/Alert').Alert;
+      await AlertModel.deleteMany({ geofenceId: { $in: ids } });
+      const result = await GeofenceModel.deleteMany({ _id: { $in: ids } });
+      res.json({ success: true, data: { deletedCount: result.deletedCount } });
+    } catch (error) {
+      console.error('Batch delete error:', error);
+      res.status(500).json({ success: false, message: 'Failed to batch delete' });
+    }
   }
+
 };

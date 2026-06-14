@@ -5,5 +5,7 @@ export const config = {
   corsOrigin: process.env.CORS_ORIGIN || '*',
   minReportInterval: parseInt(process.env.MIN_REPORT_INTERVAL || '100'),
   maxConnections: parseInt(process.env.MAX_CONNECTIONS || '10000'),
-  maxConnectionsPerIp: parseInt(process.env.MAX_CONNECTIONS_PER_IP || '100')
+  maxConnectionsPerIp: parseInt(process.env.MAX_CONNECTIONS_PER_IP || '100'),
+  apiKeyEnabled: process.env.API_KEY_ENABLED === 'true',
+  apiKey: process.env.API_KEY || 'dev-api-key-logistics-tracking-2026'
 };

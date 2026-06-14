@@ -148,7 +148,7 @@ export class WebSocketService {
   ): Promise<void> {
     const { deviceId, longitude, latitude, altitude = 0, speed = 0, direction = 0, timestamp, deviceToken } = payload;
     const dev = await Device.findOne({ deviceId });
-    if (!deviceToken || dev!.deviceToken !== deviceToken) {
+    if (!dev || !deviceToken || dev.deviceToken !== deviceToken) {
       socket.emit("error", { message: "Invalid or missing token" });
       return;
     }
@@ -247,7 +247,7 @@ export class WebSocketService {
   private async handleDevicePing(socket: Socket, payload: { deviceId: string; deviceToken?: string }): Promise<void> {
     const { deviceId, deviceToken } = payload;
     const dev = await Device.findOne({ deviceId });
-    if (!deviceToken || dev!.deviceToken !== deviceToken) {
+    if (!dev || !deviceToken || dev.deviceToken !== deviceToken) {
       socket.emit("error", { message: "Invalid or missing token" });
       return;
     }

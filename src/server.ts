@@ -7,6 +7,8 @@ import { initWebSocket } from './services/websocketService';
 import { setupSwagger } from './swagger';
 import deviceRoutes from './routes/deviceRoutes';
 import geofenceRoutes from './routes/geofenceRoutes';
+import alertRoutes from './routes/alertRoutes';
+import { apiKeyAuth } from './middleware/authMiddleware';
 
 async function bootstrap(): Promise<void> {
   await connectDatabase();
@@ -22,6 +24,8 @@ async function bootstrap(): Promise<void> {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
     next();
   });
+
+  app.use(apiKeyAuth);
 
   app.get('/', (req: Request, res: Response) => {
     res.json({
@@ -44,8 +48,9 @@ async function bootstrap(): Promise<void> {
     });
   });
 
-  app.use('/devices', deviceRoutes);
-  app.use('/geofences', geofenceRoutes);
+  app.use('/api/devices', deviceRoutes);
+  app.use('/api/geofences', geofenceRoutes);
+  app.use('/api/alerts', alertRoutes);
 
   setupSwagger(app);
 

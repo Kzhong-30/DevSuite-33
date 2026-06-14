@@ -1,7 +1,9 @@
 import { Request, Response } from 'express';
 import { Device } from '../models/Device';
 import { Location } from '../models/Location';
+import { Alert } from '../models/Alert';
 import { getWebSocketService } from '../services/websocketService';
+import { isValidObjectId } from 'mongoose';
 
 export const deviceController = {
   async getAllDevices(req: Request, res: Response): Promise<void> {
@@ -151,7 +153,7 @@ export const deviceController = {
   async getDeviceHistory(req: Request, res: Response): Promise<void> {
     try {
       const { id } = req.params;
-      const { start, end, page = '1', limit = '100' } = req.query;
+      const { start, end, page = '1', limit = '100', format = 'default', dedup = 'false', simplify = 'false', tolerance = '0' } = req.query;
 
       const device = await Device.findOne({ deviceId: id }).lean();
       if (!device) {
@@ -180,24 +182,112 @@ export const deviceController = {
         .limit(limitNum)
         .lean();
 
-      res.json({
-        success: true,
-        data: history.map((loc) => ({
-          deviceId: loc.deviceId,
-          longitude: loc.longitude,
-          latitude: loc.latitude,
-          altitude: loc.altitude,
-          speed: loc.speed,
-          direction: loc.direction,
-          timestamp: loc.timestamp
-        })),
-        pagination: {
-          page: pageNum,
-          limit: limitNum,
-          total,
-          totalPages: Math.ceil(total / limitNum)
+      const formatStr = format as string;
+      const dedupBool = dedup === 'true';
+      const simplifyBool = simplify === 'true';
+      const tol = parseFloat(tolerance as string) || 0;
+
+      let historyData = history.map((loc) => ({
+        deviceId: loc.deviceId,
+        longitude: loc.longitude,
+        latitude: loc.latitude,
+        altitude: loc.altitude,
+        speed: loc.speed,
+        direction: loc.direction,
+        timestamp: loc.timestamp
+      }));
+
+      const originalCount = historyData.length;
+      let deduplicated = 0;
+
+      if (dedupBool) {
+        const coords = historyData.map((h: any) => [h.longitude, h.latitude]);
+        const dedupedCoords = deduplicateCoordinates(coords);
+        deduplicated = coords.length - dedupedCoords.length;
+        const dedupedData: any[] = [];
+        let coordIdx = 0;
+        for (let i = 0; i < historyData.length && coordIdx < dedupedCoords.length; i++) {
+          const h = historyData[i];
+          if (h.longitude === dedupedCoords[coordIdx][0] && h.latitude === dedupedCoords[coordIdx][1]) {
+            dedupedData.push(h);
+            coordIdx++;
+          }
         }
-      });
+        historyData = dedupedData;
+      }
+
+      let simplified = false;
+      if (simplifyBool && tol > 0 && historyData.length > 2) {
+        const coords = historyData.map((h: any) => [h.longitude, h.latitude]);
+        const simplifiedCoords = douglasPeucker(coords, tol);
+        simplified = simplifiedCoords.length < coords.length;
+        const simplifiedData: any[] = [];
+        let coordIdx = 0;
+        for (let i = 0; i < historyData.length && coordIdx < simplifiedCoords.length; i++) {
+          const h = historyData[i];
+          if (h.longitude === simplifiedCoords[coordIdx][0] && h.latitude === simplifiedCoords[coordIdx][1]) {
+            simplifiedData.push(h);
+            coordIdx++;
+          }
+        }
+        historyData = simplifiedData;
+      }
+
+      if (formatStr === 'geojson') {
+        const features = historyData.map((loc: any) => ({
+          type: 'Feature',
+          geometry: {
+            type: 'Point',
+            coordinates: [loc.longitude, loc.latitude]
+          },
+          properties: {
+            deviceId: loc.deviceId,
+            timestamp: loc.timestamp,
+            speed: loc.speed,
+            direction: loc.direction,
+            altitude: loc.altitude
+          }
+        }));
+
+        res.json({
+          success: true,
+          data: {
+            type: 'FeatureCollection',
+            features,
+            metadata: {
+              deviceId: id,
+              pointCount: features.length,
+              deduplicated,
+              simplified,
+              format: 'geojson'
+            }
+          },
+          pagination: {
+            page: pageNum,
+            limit: limitNum,
+            total,
+            totalPages: Math.ceil(total / limitNum)
+          }
+        });
+      } else {
+        res.json({
+          success: true,
+          data: historyData,
+          metadata: {
+            deviceId: id,
+            pointCount: historyData.length,
+            deduplicated,
+            simplified,
+            format: 'default'
+          },
+          pagination: {
+            page: pageNum,
+            limit: limitNum,
+            total,
+            totalPages: Math.ceil(total / limitNum)
+          }
+        });
+      }
     } catch (error) {
       console.error('Error fetching device history:', error);
       res.status(500).json({
@@ -211,7 +301,7 @@ export const deviceController = {
   async getDeviceRoute(req: Request, res: Response): Promise<void> {
     try {
       const { id } = req.params;
-      const { start, end } = req.query;
+      const { start, end, dedup = 'true', simplify = 'true', tolerance = '0.0001' } = req.query;
 
       const device = await Device.findOne({ deviceId: id }).lean();
       if (!device) {
@@ -246,12 +336,14 @@ export const deviceController = {
         loc.latitude
       ]);
 
-      let coords = deduplicateCoordinates(coordinates);
-      const tolerance = req.query.tolerance ? parseFloat(req.query.tolerance as string) : 0.0001;
-      if (!isNaN(tolerance) && tolerance >= 0) {
-        coords = douglasPeucker(coords, tolerance);
+      let coords = dedup === 'true' ? deduplicateCoordinates(coordinates) : [...coordinates];
+      const tol = parseFloat(tolerance as string) || 0;
+      let simplified = false;
+      if (simplify === 'true' && !isNaN(tol) && tol > 0) {
+        const newCoords = douglasPeucker(coords, tol);
+        simplified = newCoords.length < coords.length;
+        coords = newCoords;
       }
-      const simplified = coords.length < coordinates.length;
 
       const lineString = {
         type: 'LineString',
@@ -282,6 +374,23 @@ export const deviceController = {
         message: 'Failed to fetch device route',
         error: error instanceof Error ? error.message : 'Unknown error'
       });
+    }
+  },
+  async deleteDevice(req: Request, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      if (!isValidObjectId(id) && typeof id !== 'string') { res.status(400).json({ success: false, message: 'Invalid device ID' }); return; }
+      const device = await Device.findOne({ $or: [{ _id: isValidObjectId(id) ? id : null }, { deviceId: id }] });
+      if (!device) { res.status(404).json({ success: false, message: 'Device not found' }); return; }
+      await Alert.deleteMany({ deviceId: device.deviceId });
+      await Location.deleteMany({ deviceId: device.deviceId });
+      await Device.deleteOne({ _id: device._id });
+      const io = (req as any).app.get('io');
+      if (io) io.emit('device:offline', { deviceId: device.deviceId, timestamp: new Date() });
+      res.json({ success: true, message: 'Device and all associated data deleted' });
+    } catch (error) {
+      console.error('Error deleting device:', error);
+      res.status(500).json({ success: false, message: 'Failed to delete device' });
     }
   }
 };
